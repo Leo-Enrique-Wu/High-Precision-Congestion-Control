@@ -1,0 +1,7 @@
+Waf: Entering directory `/home/chw398/Project/N_MS/High-Precision-Congestion-Control/simulation/build'
+[ 691/1433] cxx: scratch/third.cc -> build/scratch/third.cc.3.o
+[1424/1433] cxxprogram: build/scratch/third.cc.3.o -> build/scratch/third
+Waf: Leaving directory `/home/chw398/Project/N_MS/High-Precision-Congestion-Control/simulation/build'
+'build' finished successfully (11.120s)
+Start to run main
+Interrupted 

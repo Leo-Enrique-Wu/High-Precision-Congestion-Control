@@ -117,8 +117,16 @@ uint64_t RdmaQueuePair::GetOnTheFly(){
 	return snd_nxt - snd_una;
 }
 
-bool RdmaQueuePair::IsWinBound(){
+bool RdmaQueuePair::IsWinBound(bool print){
+	
+	// leo start
 	uint64_t w = GetWin();
+	// uint64_t w = HpGetCurWin(); // W^c
+	if (print) {
+		printf("w = %lu, m_win = %d, GetOnTheFly = %lu\n", w, m_win, GetOnTheFly());
+	}
+	// leo end
+	
 	return w != 0 && GetOnTheFly() >= w;
 }
 

@@ -78,7 +78,7 @@ uint32_t enable_trace = 1;
 
 uint32_t buffer_size = 16;
 
-uint32_t qlen_dump_interval = 100000000, qlen_mon_interval = 100;
+uint32_t qlen_dump_interval = 100000000, qlen_mon_interval = 1000;
 uint64_t qlen_mon_start = 2000000000, qlen_mon_end = 2100000000;
 string qlen_mon_file;
 
@@ -135,7 +135,24 @@ void ReadFlowInput(){
 void ScheduleFlowInputs(){
 	while (flow_input.idx < flow_num && Seconds(flow_input.start_time) == Simulator::Now()){
 		uint32_t port = portNumder[flow_input.src][flow_input.dst]++; // get a new port number 
-		RdmaClientHelper clientHelper(flow_input.pg, serverAddress[flow_input.src], serverAddress[flow_input.dst], port, flow_input.dport, flow_input.maxPacketCount, has_win?(global_t==1?maxBdp:pairBdp[n.Get(flow_input.src)][n.Get(flow_input.dst)]):0, global_t==1?maxRtt:pairRtt[flow_input.src][flow_input.dst]);
+		
+		printf("[flow] src=%d, dst=%d, Window=%d, BaseRtt=%d\n", flow_input.src, flow_input.dst,
+				has_win? (
+										global_t == 1 ? maxBdp : pairBdp[n.Get(flow_input.src)][n.Get(flow_input.dst)]
+								 )
+								 :0,
+				global_t == 1 ? maxRtt : pairRtt[flow_input.src][flow_input.dst]); 
+		
+		RdmaClientHelper clientHelper(
+				flow_input.pg, serverAddress[flow_input.src], serverAddress[flow_input.dst], 
+				port, flow_input.dport, flow_input.maxPacketCount, 
+				has_win? (
+										global_t == 1 ? maxBdp : pairBdp[n.Get(flow_input.src)][n.Get(flow_input.dst)]
+								 )
+								 :0, 
+				global_t == 1 ? maxRtt : pairRtt[flow_input.src][flow_input.dst]
+		);
+		
 		ApplicationContainer appCon = clientHelper.Install(n.Get(flow_input.src));
 		appCon.Start(Time(0));
 
@@ -163,10 +180,15 @@ uint32_t ip_to_node_id(Ipv4Address ip){
 void qp_finish(FILE* fout, Ptr<RdmaQueuePair> q){
 	uint32_t sid = ip_to_node_id(q->sip), did = ip_to_node_id(q->dip);
 	uint64_t base_rtt = pairRtt[sid][did], b = pairBw[sid][did];
+	
+	
+	// b = b / flow_num; // incast 16 flows
+	
 	uint32_t total_bytes = q->m_size + ((q->m_size-1) / packet_payload_size + 1) * (CustomHeader::GetStaticWholeHeaderSize() - IntHeader::GetStaticSize()); // translate to the minimum bytes required (with header but no INT)
 	uint64_t standalone_fct = base_rtt + total_bytes * 8000000000lu / b;
 	// sip, dip, sport, dport, size (B), start_time, fct (ns), standalone_fct (ns)
-	fprintf(fout, "%08x %08x %u %u %lu %lu %lu %lu\n", q->sip.Get(), q->dip.Get(), q->sport, q->dport, q->m_size, q->startTime.GetTimeStep(), (Simulator::Now() - q->startTime).GetTimeStep(), standalone_fct);
+	fprintf(fout, "%08x %08x %u %u %lu %lu %lu %lu %lu\n", q->sip.Get(), q->dip.Get(), q->sport, q->dport, q->m_size, 
+		q->startTime.GetTimeStep(), (Simulator::Now() - q->startTime).GetTimeStep(), standalone_fct, b);
 	fflush(fout);
 
 	// remove rxQp from the receiver
@@ -180,7 +202,9 @@ void get_pfc(FILE* fout, Ptr<QbbNetDevice> dev, uint32_t type){
 }
 
 struct QlenDistribution{
+	
 	vector<uint32_t> cnt; // cnt[i] is the number of times that the queue len is i KB
+	uint32_t currentQlen; // a record to store the current qlen(in Kbit)
 
 	void add(uint32_t qlen){
 		uint32_t kb = qlen / 1000;
@@ -188,34 +212,66 @@ struct QlenDistribution{
 			cnt.resize(kb+1);
 		cnt[kb]++;
 	}
+	
+	void storeCurrentQlen(uint32_t qlen){
+		uint32_t kb = qlen / 1000;
+		currentQlen = kb;
+	}
+	
 };
+
 map<uint32_t, map<uint32_t, QlenDistribution> > queue_result;
 void monitor_buffer(FILE* qlen_output, NodeContainer *n){
 	for (uint32_t i = 0; i < n->GetN(); i++){
 		if (n->Get(i)->GetNodeType() == 1){ // is switch
 			Ptr<SwitchNode> sw = DynamicCast<SwitchNode>(n->Get(i));
+			
+			// If cannot find the corresponding QlenDistribution in the map `queue_result`,
+			// then new an entry
 			if (queue_result.find(i) == queue_result.end())
 				queue_result[i];
+			
+			// GetNDevices(): return the number of NetDevice instances associated
+			//                to this Node.
 			for (uint32_t j = 1; j < sw->GetNDevices(); j++){
 				uint32_t size = 0;
 				for (uint32_t k = 0; k < SwitchMmu::qCnt; k++)
+					// [Q] Why check egress instead of ingress? 
 					size += sw->m_mmu->egress_bytes[j][k];
-				queue_result[i][j].add(size);
+				
+				// queue_result[i][j].add(size);
+				queue_result[i][j].storeCurrentQlen(size);
 			}
 		}
 	}
-	if (Simulator::Now().GetTimeStep() % qlen_dump_interval == 0){
-		fprintf(qlen_output, "time: %lu\n", Simulator::Now().GetTimeStep());
+	// Leo: dump record for every monitoring event
+	// if (Simulator::Now().GetTimeStep() % qlen_dump_interval == 0){
+		// fprintf(qlen_output, "time: %lu\n", Simulator::Now().GetTimeStep());
 		for (auto &it0 : queue_result)
+			// it0: <switchId : map<>>
 			for (auto &it1 : it0.second){
-				fprintf(qlen_output, "%u %u", it0.first, it1.first);
+				
+				if (it1.first != 1) {
+					continue;
+				}
+				
+				/*
 				auto &dist = it1.second.cnt;
 				for (uint32_t i = 0; i < dist.size(); i++)
 					fprintf(qlen_output, " %u", dist[i]);
-				fprintf(qlen_output, "\n");
+				*/
+				uint32_t currentQlen = it1.second.currentQlen;
+				
+				// leo: only print the record has q accumulative
+				// if (currentQlen > 0) {
+					fprintf(qlen_output, "%lu: %u %u", Simulator::Now().GetTimeStep(), it0.first, it1.first);
+					fprintf(qlen_output, " %u", currentQlen);
+					fprintf(qlen_output, "\n");
+				// }
+				
 			}
 		fflush(qlen_output);
-	}
+	// }
 	if (Simulator::Now().GetTimeStep() < qlen_mon_end)
 		Simulator::Schedule(NanoSeconds(qlen_mon_interval), &monitor_buffer, qlen_output, n);
 }
@@ -335,6 +391,7 @@ uint64_t get_nic_rate(NodeContainer &n){
 
 int main(int argc, char *argv[])
 {
+	printf("Start to run main\n");
 	clock_t begint, endt;
 	begint = clock();
 #ifndef PGO_TRAINING
@@ -730,6 +787,7 @@ int main(int argc, char *argv[])
 		if (n.Get(i)->GetNodeType() == 0){ // is server
 			serverAddress.resize(i + 1);
 			serverAddress[i] = node_id_to_ip(i);
+			printf("server(id = %d)'s ip = %d\n", i, node_id_to_ip(i));
 		}
 	}
 
@@ -921,12 +979,14 @@ int main(int argc, char *argv[])
 			uint64_t bdp = rtt * bw / 1000000000/8; 
 			pairBdp[n.Get(i)][n.Get(j)] = bdp;
 			pairRtt[i][j] = rtt;
+			// printf("pairRtt[%d][%d] = %lu\n", i, j, rtt);
 			if (bdp > maxBdp)
 				maxBdp = bdp;
 			if (rtt > maxRtt)
 				maxRtt = rtt;
 		}
 	}
+	// maxBdp = 1000; // maxBdp * 0.1
 	printf("maxRtt=%lu maxBdp=%lu\n", maxRtt, maxBdp);
 
 	//

@@ -12,6 +12,7 @@
 #include "ppp-header.h"
 #include "qbb-header.h"
 #include "cn-header.h"
+#include <inttypes.h>
 
 namespace ns3{
 
@@ -220,12 +221,18 @@ Ptr<RdmaQueuePair> RdmaHw::GetQp(uint32_t dip, uint16_t sport, uint16_t pg){
 		return it->second;
 	return NULL;
 }
-void RdmaHw::AddQueuePair(uint64_t size, uint16_t pg, Ipv4Address sip, Ipv4Address dip, uint16_t sport, uint16_t dport, uint32_t win, uint64_t baseRtt, Callback<void> notifyAppFinish){
+void RdmaHw::AddQueuePair(uint64_t size, uint16_t pg, Ipv4Address sip, Ipv4Address dip, uint16_t sport, uint16_t dport, 
+														uint32_t win, uint64_t baseRtt, Callback<void> notifyAppFinish){
 	// create qp
 	Ptr<RdmaQueuePair> qp = CreateObject<RdmaQueuePair>(pg, sip, dip, sport, dport);
 	qp->SetSize(size);
 	qp->SetWin(win);
 	qp->SetBaseRtt(baseRtt);
+	
+	if (sip.Get() == 184557825) {
+		printf("m_var_win = %s\n", m_var_win? "true" : "false");
+	}
+	
 	qp->SetVarWin(m_var_win);
 	qp->SetAppNotifyCallback(notifyAppFinish);
 
@@ -237,12 +244,16 @@ void RdmaHw::AddQueuePair(uint64_t size, uint16_t pg, Ipv4Address sip, Ipv4Addre
 
 	// set init variables
 	DataRate m_bps = m_nic[nic_idx].dev->GetDataRate();
-	qp->m_rate = m_bps;
+	// leo start
+	DataRate slowStartRate = m_bps * 0.01;
+	// leo end
+	printf("Init DataRate(sip = %d, dip = %d) = %" PRIu64 "\n" , sip.Get(), dip.Get(), slowStartRate.GetBitRate()); // m_bps.GetBitRate
+	qp->m_rate = slowStartRate; // m_bps
 	qp->m_max_rate = m_bps;
 	if (m_cc_mode == 1){
 		qp->mlx.m_targetRate = m_bps;
 	}else if (m_cc_mode == 3){
-		qp->hp.m_curRate = m_bps;
+		qp->hp.m_curRate = slowStartRate; // = m_bps
 		if (m_multipleRate){
 			for (uint32_t i = 0; i < IntHeader::maxHop; i++)
 				qp->hp.hopState[i].Rc = m_bps;
@@ -585,6 +596,9 @@ Ptr<Packet> RdmaHw::GetNxtPacket(Ptr<RdmaQueuePair> qp){
 
 void RdmaHw::PktSent(Ptr<RdmaQueuePair> qp, Ptr<Packet> pkt, Time interframeGap){
 	qp->lastPktSize = pkt->GetSize();
+	// leo start
+	pkt->SetSendingTime(Simulator::Now().GetTimeStep());
+	// leo end
 	UpdateNextAvail(qp, interframeGap, pkt->GetSize());
 }
 
@@ -755,49 +769,139 @@ void RdmaHw::UpdateRateHp(Ptr<RdmaQueuePair> qp, Ptr<Packet> p, CustomHeader &ch
 	uint32_t next_seq = qp->snd_nxt;
 	bool print = !fast_react || true;
 	if (qp->hp.m_lastUpdateSeq == 0){ // first RTT
+		
 		qp->hp.m_lastUpdateSeq = next_seq;
+		
+		// uint32_t sourceIp = qp->sip.Get();
+		// printf("sip = %u = %08x\n", sourceIp, sourceIp);
+		/*
+		sip = 184549889 = 0b000201
+		sip = 184550145 = 0b000301
+		sip = 184550401 = 0b000401
+		sip = 184550657 = 0b000501
+		sip = 184550913 = 0b000601
+		sip = 184551169 = 0b000701
+		sip = 184551425 = 0b000801
+		sip = 184551681 = 0b000901
+		sip = 184551937 = 0b000a01
+		sip = 184552193 = 0b000b01
+		sip = 184552449 = 0b000c01
+		sip = 184552705 = 0b000d01
+		sip = 184552961 = 0b000e01
+		sip = 184553217 = 0b000f01
+		sip = 184553473 = 0b001001
+		sip = 184553729 = 0b001101
+		*/
+		
+		// leo start
+
+		uint64_t sendingTime = p->GetSendingTime();
+		uint64_t receiveAckTime = Simulator::Now().GetTimeStep();
+		
+		if (qp->sip.Get() == 184553729) {
+				printf("%s %lu %lu %lu %s %08x %08x %u %u [%u,%u,%u]\n", "first RTT", Simulator::Now().GetTimeStep(), sendingTime, 
+					receiveAckTime - sendingTime, fast_react? "fast" : "update", 
+					qp->sip.Get(), qp->dip.Get(), qp->sport, qp->dport, qp->hp.m_lastUpdateSeq, ch.ack.seq, next_seq);
+		}
+
+		// leo end
+		
 		// store INT
 		IntHeader &ih = ch.ack.ih;
 		NS_ASSERT(ih.nhop <= IntHeader::maxHop);
 		for (uint32_t i = 0; i < ih.nhop; i++)
 			qp->hp.hop[i] = ih.hop[i];
+			
+		// printf("%lu %s %08x %08x %u %u [%u,%u,%u]\n", Simulator::Now().GetTimeStep(), fast_react? "fast" : "update", 
+		//		qp->sip.Get(), qp->dip.Get(), qp->sport, qp->dport, qp->hp.m_lastUpdateSeq, ch.ack.seq, next_seq);	
+			
 		#if PRINT_LOG
 		if (print){
-			printf("%lu %s %08x %08x %u %u [%u,%u,%u]", Simulator::Now().GetTimeStep(), fast_react? "fast" : "update", qp->sip.Get(), qp->dip.Get(), qp->sport, qp->dport, qp->hp.m_lastUpdateSeq, ch.ack.seq, next_seq);
+			printf("%lu %s %08x %08x %u %u [%u,%u,%u]", Simulator::Now().GetTimeStep(), fast_react? "fast" : "update", 
+				qp->sip.Get(), qp->dip.Get(), qp->sport, qp->dport, qp->hp.m_lastUpdateSeq, ch.ack.seq, next_seq);
 			for (uint32_t i = 0; i < ih.nhop; i++)
 				printf(" %u %lu %lu", ih.hop[i].GetQlen(), ih.hop[i].GetBytes(), ih.hop[i].GetTime());
 			printf("\n");
 		}
 		#endif
-	}else {
+		
+		// leo start
+		/*
+		DataRate new_rate;
+		int32_t new_incStage;
+		new_rate = qp->hp.m_curRate / 16;
+		new_incStage = 0;
+		
+		if (qp->sip.Get() == 184553729) {
+			printf(" %lu, rate:%.3lf->%.3lf\n", Simulator::Now().GetTimeStep(), qp->hp.m_curRate.GetBitRate()*1e-9, new_rate.GetBitRate()*1e-9);
+		}
+		
+		ChangeRate(qp, new_rate);
+		qp->hp.m_curRate = new_rate;
+		qp->hp.m_incStage = new_incStage;
+		*/
+		// leo end
+		
+	} else {
 		// check packet INT
 		IntHeader &ih = ch.ack.ih;
+		// leo start
+		uint64_t sendingTime = p->GetSendingTime();
+		uint64_t receiveAckTime = Simulator::Now().GetTimeStep();
+		// leo end
+		
+		// uint32_t sourceIp = qp->sip.Get();
+		// printf("sip = %u = %08x\n", sourceIp, sourceIp);
+		
+
+		if (qp->sip.Get() == 184553729) {
+				printf("%lu %lu %lu %s %08x %08x %u %u [%u,%u,%u]\n", Simulator::Now().GetTimeStep(), sendingTime,
+					receiveAckTime - sendingTime, fast_react? "fast" : "update", 
+					qp->sip.Get(), qp->dip.Get(), qp->sport, qp->dport, qp->hp.m_lastUpdateSeq, ch.ack.seq, next_seq);
+		}
+
+		
 		if (ih.nhop <= IntHeader::maxHop){
 			double max_c = 0;
 			bool inStable = false;
 			#if PRINT_LOG
 			if (print)
-				printf("%lu %s %08x %08x %u %u [%u,%u,%u]", Simulator::Now().GetTimeStep(), fast_react? "fast" : "update", qp->sip.Get(), qp->dip.Get(), qp->sport, qp->dport, qp->hp.m_lastUpdateSeq, ch.ack.seq, next_seq);
+				printf("%lu %s %08x %08x %u %u [%u,%u,%u]", Simulator::Now().GetTimeStep(), fast_react? "fast" : "update", 
+					qp->sip.Get(), qp->dip.Get(), qp->sport, qp->dport, qp->hp.m_lastUpdateSeq, ch.ack.seq, next_seq);
 			#endif
+			
 			// check each hop
 			double U = 0;
 			uint64_t dt = 0;
 			bool updated[IntHeader::maxHop] = {false}, updated_any = false;
 			NS_ASSERT(ih.nhop <= IntHeader::maxHop);
+				
+			// examine each hop
 			for (uint32_t i = 0; i < ih.nhop; i++){
+				
 				if (m_sampleFeedback){
+					// leo start
+					if (fast_react)
+						continue;
+					// leo end
+					/*
 					if (ih.hop[i].GetQlen() == 0 && fast_react)
 						continue;
+					*/
 				}
+				
 				updated[i] = updated_any = true;
 				#if PRINT_LOG
 				if (print)
-					printf(" %u(%u) %lu(%lu) %lu(%lu)", ih.hop[i].GetQlen(), qp->hp.hop[i].GetQlen(), ih.hop[i].GetBytes(), qp->hp.hop[i].GetBytes(), ih.hop[i].GetTime(), qp->hp.hop[i].GetTime());
+					printf(" %u(%u) %lu(%lu) %lu(%lu)", ih.hop[i].GetQlen(), qp->hp.hop[i].GetQlen(), 
+							ih.hop[i].GetBytes(), qp->hp.hop[i].GetBytes(), ih.hop[i].GetTime(), qp->hp.hop[i].GetTime());
 				#endif
-				uint64_t tau = ih.hop[i].GetTimeDelta(qp->hp.hop[i]);;
-				double duration = tau * 1e-9;
-				double txRate = (ih.hop[i].GetBytesDelta(qp->hp.hop[i])) * 8 / duration;
-				double u = txRate / ih.hop[i].GetLineRate() + (double)std::min(ih.hop[i].GetQlen(), qp->hp.hop[i].GetQlen()) * qp->m_max_rate.GetBitRate() / ih.hop[i].GetLineRate() /qp->m_win;
+				uint64_t tau = ih.hop[i].GetTimeDelta(qp->hp.hop[i]);; // unit in ns
+				double duration = tau * 1e-9; // convert unit to sec
+				double txRate = (ih.hop[i].GetBytesDelta(qp->hp.hop[i])) * 8 / duration; // Alg 1. L 4
+				double u = txRate / ih.hop[i].GetLineRate() 
+										+ (double)std::min(ih.hop[i].GetQlen(), qp->hp.hop[i].GetQlen()) 
+											* qp->m_max_rate.GetBitRate() / ih.hop[i].GetLineRate() / qp->m_win;
 				#if PRINT_LOG
 				if (print)
 					printf(" %.3lf %.3lf", txRate, u);
@@ -824,8 +928,11 @@ void RdmaHw::UpdateRateHp(Ptr<RdmaQueuePair> qp, Ptr<Packet> p, CustomHeader &ch
 			if (!m_multipleRate){
 				// for aggregate (single R)
 				if (updated_any){
+					
+					// Why do this?
 					if (dt > qp->m_baseRtt)
 						dt = qp->m_baseRtt;
+						
 					qp->hp.u = (qp->hp.u * (qp->m_baseRtt - dt) + U * dt) / double(qp->m_baseRtt);
 					max_c = qp->hp.u / m_targetUtil;
 
@@ -836,10 +943,19 @@ void RdmaHw::UpdateRateHp(Ptr<RdmaQueuePair> qp, Ptr<Packet> p, CustomHeader &ch
 						new_rate = qp->hp.m_curRate + m_rai;
 						new_incStage = qp->hp.m_incStage+1;
 					}
+					
 					if (new_rate < m_minRate)
 						new_rate = m_minRate;
+						
 					if (new_rate > qp->m_max_rate)
 						new_rate = qp->m_max_rate;
+					
+					if (qp->sip.Get() == 184553729) {
+						printf(" %lu, u=%.6lf U=%.3lf dt=%u max_c=%.3lf, m_incStage=%d, m_miThresh=%d", Simulator::Now().GetTimeStep(), qp->hp.u, U, dt, 
+											max_c, qp->hp.m_incStage, m_miThresh);
+						printf(" rate:%.3lf->%.3lf\n", qp->hp.m_curRate.GetBitRate()*1e-9, new_rate.GetBitRate()*1e-9);
+					}
+						
 					#if PRINT_LOG
 					if (print)
 						printf(" u=%.6lf U=%.3lf dt=%u max_c=%.3lf", qp->hp.u, U, dt, max_c);
@@ -849,7 +965,7 @@ void RdmaHw::UpdateRateHp(Ptr<RdmaQueuePair> qp, Ptr<Packet> p, CustomHeader &ch
 						printf(" rate:%.3lf->%.3lf\n", qp->hp.m_curRate.GetBitRate()*1e-9, new_rate.GetBitRate()*1e-9);
 					#endif
 				}
-			}else{
+			} else {
 				// for per hop (per hop R)
 				new_rate = qp->m_max_rate;
 				for (uint32_t i = 0; i < ih.nhop; i++){
@@ -887,8 +1003,10 @@ void RdmaHw::UpdateRateHp(Ptr<RdmaQueuePair> qp, Ptr<Packet> p, CustomHeader &ch
 				printf("\n");
 				#endif
 			}
+			
 			if (updated_any)
 				ChangeRate(qp, new_rate);
+				
 			if (!fast_react){
 				if (updated_any){
 					qp->hp.m_curRate = new_rate;
@@ -904,11 +1022,14 @@ void RdmaHw::UpdateRateHp(Ptr<RdmaQueuePair> qp, Ptr<Packet> p, CustomHeader &ch
 					}
 				}
 			}
+			
 		}
+		
 		if (!fast_react){
 			if (next_seq > qp->hp.m_lastUpdateSeq)
 				qp->hp.m_lastUpdateSeq = next_seq; //+ rand() % 2 * m_mtu;
 		}
+		
 	}
 }
 

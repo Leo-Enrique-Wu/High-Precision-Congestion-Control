@@ -103,7 +103,16 @@ namespace ns3 {
 		for (qIndex = 1; qIndex <= fcount; qIndex++){
 			uint32_t idx = (qIndex + m_rrlast) % fcount;
 			Ptr<RdmaQueuePair> qp = m_qpGrp->Get(idx);
-			if (!paused[qp->m_pg] && qp->GetBytesLeft() > 0 && !qp->IsWinBound()){
+			
+			// leo start
+			bool printWinBound = false;
+			if (qp->sip.Get() == 184553729) {
+				// printf("sip = %lu\n", qp->sip.Get());
+				printWinBound = true;
+			}
+			// leo end
+			
+			if (!paused[qp->m_pg] && qp->GetBytesLeft() > 0 && !qp->IsWinBound(printWinBound)){
 				if (m_qpGrp->Get(idx)->m_nextAvail.GetTimeStep() > Simulator::Now().GetTimeStep()) //not available now
 					continue;
 				res = idx;
@@ -261,6 +270,8 @@ namespace ns3 {
 		if (!m_linkUp) return; // if link is down, return
 		if (m_txMachineState == BUSY) return;	// Quit if channel busy
 		Ptr<Packet> p;
+		
+		// GetNodeType() == 0 means it's a server node
 		if (m_node->GetNodeType() == 0){
 			int qIndex = m_rdmaEQ->GetNextQindex(m_paused);
 			if (qIndex != -1024){
@@ -281,6 +292,7 @@ namespace ns3 {
 				// update for the next avail time
 				m_rdmaPktSent(lastQp, p, m_tInterframeGap);
 			}else { // no packet to send
+				// printf("%lu, node=%d has no packet to send\n", Simulator::Now().GetTimeStep(), m_node->GetId());
 				NS_LOG_INFO("PAUSE prohibits send at node " << m_node->GetId());
 				Time t = Simulator::GetMaximumSimulationTime();
 				for (uint32_t i = 0; i < m_rdmaEQ->GetFlowCount(); i++){

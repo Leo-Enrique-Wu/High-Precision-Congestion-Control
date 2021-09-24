@@ -220,8 +220,21 @@ void SwitchNode::SwitchNotifyDequeue(uint32_t ifIndex, uint32_t qIndex, Ptr<Pack
 		if (buf[PppHeader::GetStaticSize() + 9] == 0x11){ // udp packet
 			IntHeader *ih = (IntHeader*)&buf[PppHeader::GetStaticSize() + 20 + 8 + 6]; // ppp, ip, udp, SeqTs, INT
 			Ptr<QbbNetDevice> dev = DynamicCast<QbbNetDevice>(m_devices[ifIndex]);
+			
 			if (m_ccMode == 3){ // HPCC
+				
+				// leo start
+				/*
+				uint64_t t = Simulator::Now().GetTimeStep();
+				uint64_t dt = t - m_lastPktTs[ifIndex];
+				uint32_t transmittedData = m_lastPktSize[ifIndex];
+				double txRate = transmittedData / (double)dt; // unit: Byte/ns
+				*/
+				// leo end
+				
+				// ts, txBytes, qlen, B
 				ih->PushHop(Simulator::Now().GetTimeStep(), m_txBytes[ifIndex], dev->GetQueue()->GetNBytesTotal(), dev->GetDataRate().GetBitRate());
+					
 			}else if (m_ccMode == 10){ // HPCC-PINT
 				uint64_t t = Simulator::Now().GetTimeStep();
 				uint64_t dt = t - m_lastPktTs[ifIndex];
@@ -299,9 +312,11 @@ void SwitchNode::SwitchNotifyDequeue(uint32_t ifIndex, uint32_t qIndex, Ptr<Pack
 			}
 		}
 	}
+	
 	m_txBytes[ifIndex] += p->GetSize();
 	m_lastPktSize[ifIndex] = p->GetSize();
 	m_lastPktTs[ifIndex] = Simulator::Now().GetTimeStep();
+		
 }
 
 int SwitchNode::logres_shift(int b, int l){
